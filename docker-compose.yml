@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: stock_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - stock_network
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: wurstmeister/zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    networks:
+      - stock_network
+
+  # Kafka Broker
+  kafka:
+    image: wurstmeister/kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_CREATE_TOPICS: "stock_data:1:1"  # Automatically create topic with 1 partition and replication factor 1
+    depends_on:
+      - zookeeper
+    networks:
+      - stock_network
+
+  # Kafka Producer
+  kafka_producer:
+    build:
+      context: ./kafka_producer
+      dockerfile: Dockerfile
+    container_name: kafka_producer
+    depends_on:
+      - kafka
+    networks:
+      - stock_network
+
+  # Spark Consumer
+  spark_consumer:
+    build:
+      context: ./spark_consumer
+    container_name: spark_consumer
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      - PYSPARK_SUBMIT_ARGS=--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0
+    command: ["/opt/bitnami/spark/bin/spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0", "/app/spark_consumer.py"]
+    networks:
+      - stock_network
+
+  # Flask Backend
+  flask_backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: flask_backend
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+    networks:
+      - stock_network
+
+  # React Frontend
+  react_frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: react-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - flask_backend
+    networks:
+      - stock_network
+
+  # Apache Airflow
+  airflow:
+    image: apache/airflow:2.5.0
+    container_name: airflow
+    restart: always
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://postgres:1234@postgres/airflow
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/airflow.cfg:/opt/airflow/airflow.cfg  # Make sure this points to a valid file
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - stock_network
+
+volumes:
+  postgres_data:
+  airflow_logs:
+
+networks:
+  stock_network:
+    driver: bridge
